@@ -1,0 +1,92 @@
+---
+title: "Assignment Nr 3"
+author: "Adrian Molière"
+date: "2023-03-11"
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(AnnotationHub)
+  library(Rsubread)
+  library(rtracklayer)
+  library(Biostrings)
+  library(Rfastp)
+  library(epiwraps)
+})
+ah <- AnnotationHub()
+```
+
+```{r, eval=FALSE}
+options(timeout=6000)
+dir.create("raw")
+download.file("https://www.encodeproject.org/files/ENCFF127RRR/@@download/ENCFF127RRR.fastq.gz", dest="raw/CTCF.fastq.gz", mode = "wb")
+```
+
+```{r, eval=FALSE}
+dir.create("CTCF_rfastp.trimmed")
+qc <- lapply(c(CTCF ="raw/CTCF.fastq.gz"), FUN=function(x){
+  Rfastp::rfastp(x, thread=4, overrepresentationAnalysis=TRUE,
+                 outputFastq=file.path("CTCF_rfastp.trimmed/",gsub("\\.fastq\\.gz$","",basename(x))))
+})
+```
+
+
+Import Drosophila genome: 
+
+```{r}
+Drosophila_genome <- ah[["AH49674"]]
+
+```
+
+```{r, eval=FALSE}
+# we create a new directory that will contain the genome index
+dir.create("CTCF_genome")
+# we write the genome sequence in fasta format
+export(import.2bit(Drosophila_genome), "CTCF_genome/genome.fasta.gz", compress=TRUE) 
+# we build an Rsubread index
+Rsubread::buildindex("CTCF_genome/rsubread", reference="CTCF_genome/genome.fasta.gz")
+```
+
+
+
+```{r, eval=FALSE}
+dir.create("aligned")
+align.stats <- Rsubread::align(index="CTCF_genome/rsubread", type="dna",
+                               readfile1=c("CTCF_rfastp.trimmed/CTCF_R1.fastq.gz"),
+                               output_file=c("aligned/CTCF.bam"),
+                               nthreads=6, sortReadsByCoordinates=TRUE)
+
+```
+How many reads were mapped?
+
+```{r, eval=FALSE}
+align.stats
+```
+
+
+align.stats shows: 3816990 total reads, 3504769 reads mapped. --> 91.82%
+
+```{r}
+peaks <- callPeaks("aligned/CTCF.bam", fragLength=50L) 
+
+```
+```{r, eval=FALSE}
+# if we want to save it as a bed file:
+dir.create("peaks")
+rtracklayer::export.bed(peaks, "peaks/peaks.bed")
+```
+
+
+How many peaks were were found? 
+```{r}
+length(peaks)
+```
+
+Plotting peak No 254:
+
+```{r}
+head(peaks)
+region <- as.character(granges(peaks[254]))
+plotSignalTracks(c(CTCF="aligned/CTCF.bam"), region=region)
+```
