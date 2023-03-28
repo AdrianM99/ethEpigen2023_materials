@@ -1,0 +1,89 @@
+---
+title: "Assignment week 5"
+author: "Adrian Molière"
+date: "2023-03-25"
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(AnnotationHub)
+  library(ensembldb)
+  library(GenomicRanges)
+  library(epiwraps)
+  library(rtracklayer)
+  library(ggplot2)
+})
+ah <- AnnotationHub(localHub=TRUE)
+```
+# Getting the mESC histone mark peak files
+
+```{r}
+# first list the files:
+peakfiles <- list.files("peaks", full.names = TRUE)
+# then give them meaningful names
+names(peakfiles) <- gsub("\\.bed.gz","",basename(peakfiles))
+# then loop through them and read them:
+peaks <- lapply(peakfiles, FUN=rtracklayer::import, format="narrowPeak")
+peaks
+```
+
+
+```{r}
+regionUpset(peaks, nsets=length(peaks))
+```
+
+
+# Extractiing overlapping regions (2 methods)
+
+```{r}
+hits <- findOverlaps(peaks$H3K27me3, peaks$H3K4me3)
+overlap.regions <- peaks$H3K4me3[subjectHits(hits)]
+```
+
+
+```{r}
+overlap.regions.2nd.methode <- peaks$H3K4me3[overlapsAny(peaks$H3K4me3, peaks$H3K27me3)]
+
+```
+
+# Test if both methods are similar
+
+```{r}
+sum(overlapsAny(overlap.regions, overlap.regions.2nd.methode))
+length(overlap.regions)
+length(overlap.regions.2nd.methode)
+
+```
+Question: Why the difference in size?
+
+# Downloading neural tube cell files 
+```{r}
+download.file("https://www.encodeproject.org/files/ENCFF047QKP/@@download/ENCFF047QKP.bed.gz", "H3K27me3_neural_tube.bed.gz", mode = "wb") #H3K27me3
+download.file("https://www.encodeproject.org/files/ENCFF835CRV/@@download/ENCFF835CRV.bed.gz", "H3K4me3_neural_tube.bed.gz", mode = "wb") #H3K4me3
+```
+
+
+
+```{r}
+H3K27me3_nt_peaks <- rtracklayer::import("H3K27me3_neural_tube.bed.gz", format="narrowPeak")
+
+H3K4me3_nt_peaks <- rtracklayer::import("H3K4me3_neural_tube.bed.gz", format="narrowPeak")
+```
+
+
+# Analysis of Overlap between mESC bivalent histone mark regions, and H3K27me3 and H3K4me3 peaks in neural tube cells
+
+```{r}
+analysis_list <- list(overlap.regions, overlap.regions.2nd.methode, H3K27me3_nt_peaks, H3K4me3_nt_peaks)
+names(analysis_list) <- c("mESC_overlap_1", "mESC_overlap_2", "H3K27me3_neural_tube", "H3K4me3_neural_tube")
+
+regionUpset(analysis_list[c(1,3,4)])
+regionUpset(analysis_list[c(2,3,4)])
+```
+
+Interpretation: most of the regions, that have the bivalent signal in embryonic stem cells still have the bivalent signal in neural tube cells (1571 regions). From the mESC bivalent regions that only have one of the two histone marks in neural tube cells, most of them are now H3K4me3 marked compared to H3K27me3 (522 vs 80). Almost no mESC bivalent regions overlap with none of the two histone marks in neural tube cells (30).
+
+
+
+
