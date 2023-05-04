@@ -1,0 +1,151 @@
+---
+title: "Assignment week 8"
+author: "Adrian Molière"
+date: "2023-05-02"
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(AnnotationHub)
+  library(epiwraps)
+  library(motifmatchr)
+  library(MotifDb)
+  library(universalmotif)
+  library(sechm)
+  library(BiocParallel)
+  library(ggplot2)
+  library(chromVAR) # for motif accessibility estimation
+  library(SummarizedExperiment) # data structure
+  library(limma) # for statistical analysis
+
+})
+# to control multithreading, unix users can use:
+# register(MulticoreParam(4))
+# for windows users, rather one of the following:
+register(SerialParam())
+# register(SnowParam(2))
+```
+
+
+## Download the data
+```{r, eval=FALSE}
+download.file("https://ethz-ins.org/content/mouse_mm38_hippocampus.peakCounts.SE.rds", "ATAC_seq_mouse_hippo.peakCounts.SE.rds")
+```
+
+
+```{r}
+SE <- readRDS("ATAC_seq_mouse_hippo.peakCounts.SE.rds")
+```
+
+## Get the database of mouse motifs
+
+```{r}
+motifs <- query(MotifDb, c("Mmusculus", "HOCOMOCOv10"))
+motifs <- do.call(TFBSTools::PWMatrixList, setNames(
+           universalmotif::convert_motifs(motifs, class="TFBSTools-PWMatrix"),
+           mcols(motifs)$geneSymbol))
+
+names(motifs) = make.names(names(motifs), unique=TRUE)
+```
+I made the names unique since some motifs were present multiple times.
+
+```{r}
+genome <- BiocManager::install("BSgenome.Mmusculus.UCSC.mm10")
+```
+
+
+##Adding factors for condition and sex
+
+```{r}
+SE$condition <- as.factor(rep(1:2, each = 6))
+levels(SE$condition) <- c("CTRL", "FSS")
+
+SE$sex <- as.factor(rep(1:2, each = 3))
+levels(SE$sex) <- c("FEMALE", "MALE")
+```
+
+##Adding GC bias
+
+
+```{r}
+seqlevelsStyle(SE) = "UCSC"
+SE_gc <- suppressWarnings(chromVAR::addGCBias(SE, genome=genome))
+
+```
+
+#compute deviations and variability
+
+```{r}
+moi <- suppressWarnings(motifmatchr::matchMotifs(motifs, subject=SE_gc, genome=genome))
+
+
+dev <- chromVAR::computeDeviations(object = SE_gc, annotations=moi,
+                                   background_peaks=getBackgroundPeaks(SE_gc, niterations=1000))
+dev
+colData(dev)
+
+variability <- computeVariability(dev)
+plotVariability(variability)
+```
+
+
+```{r}
+head(assays(dev)$z)
+assays(dev)$norm <- scale(assays(dev)$z)
+dev
+```
+
+#model
+
+```{r}
+
+mm <- model.matrix(~sex+condition, data=as.data.frame(colData(dev)))
+mm
+
+```
+
+```{r}
+fit <- eBayes(lmFit(assays(dev)$norm, mm))
+
+res <- as.data.frame(topTable(fit, coef="conditionFSS", number = Inf))
+head(res)
+
+res$TF <- row.names(res)
+ggplot(res, aes(logFC, -log10(adj.P.Val), label=TF)) + geom_text() 
+```
+
+The transcription factors with the greatest change in accessibility after FSS are ANDR (Androgen receptor) and GCR (Glucocorticoid receptor). 
+The androgen receptor gets activated by binding testosterone, which is released during exercise. Thus it makes sense that the receptor is more active during forced swimming.
+The glucocorticoid response plays a crucial role in the "fight or flight" response and thus also makes sense in the context of forced swimming stress. 
+
+
+```{r}
+sechm(dev, features = head(row.names(res)), assayName="norm", top_annotation = c("sex", "condition", "depth"))
+```
+
+Looking at the heatmap, we see that sex has very little effect on the expression of GCR and ANDR. 
+
+
+```{r}
+res_sex <- as.data.frame(topTable(fit, coef="sexMALE", number = Inf))
+head(res_sex)
+
+res_sex$TF <- row.names(res_sex)
+ggplot(res_sex, aes(logFC, -log10(adj.P.Val), label=TF)) + geom_text() 
+```
+Comparing the signals of the difference sexes reveals that most of the differentially active TFs are less active in male mice. The strongest hits are TYY1 (Yin and Yang 1 protein) and TEAD1 (transcriptional enhancer factor 1). YY1 is important for X chromosome inactivation, thus it makes sense that it is predominantly active in females. I could not find any information why TEAD1 is more active in females than in males. 
+
+
+```{r}
+sechm(dev, features = head(row.names(res_sex)), assayName="norm", top_annotation = c("sex", "condition", "depth"))
+```
+
+Looking at the heatmap, we see that at least for the strongest hits the condition has no effect on the activity of the sex-specific transcription factors. 
+
+
+
+
+
+
+
