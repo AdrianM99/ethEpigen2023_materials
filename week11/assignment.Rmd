@@ -1,0 +1,221 @@
+---
+title: "Assignment week 11"
+author: "Adrian Molière"
+date: "2023-05-19"
+output: html_document
+---
+
+
+```{r}
+suppressPackageStartupMessages({
+  library(GenomicRanges)
+  library(epiwraps)
+  library(ggplot2)
+  library(rGREAT)
+  library(AnnotationHub)
+  library(ensembldb)
+  library(bsseq)
+  library(BiocParallel)
+  library(edgeR)
+  library(DMRcate)
+  library(rtracklayer)
+  library(sechm)
+  library(pheatmap)
+  library(viridis)
+  library(data.table)
+})
+
+set.seed(40)
+```
+
+## Load the data
+
+Download:
+```{r, download, eval=FALSE}
+options(timeout = 6000)
+download.file("https://ethz-ins.org/content/w11_practical.zip", "w11_practical.zip")
+unzip("w11_practical.zip")
+```
+
+The .bigwig files have already been reduced to chromosome one and only have to be loaded here:
+```{r, load bigwigs}
+tracksGr <- list("ATAC"="ATAC.rds",
+                 "CTCF"="CTCF.rds",
+                 "H3K27ac"="H3K27ac.rds",
+                 "H3K4me3"="H3K4me3.rds",
+                 "DNAme"="DNAm.rds")
+tracksGr <- lapply(tracksGr, readRDS)
+```
+
+
+## Load the Annotation data
+
+```{r, annotation}
+ah <- AnnotationHub(localHub=TRUE)
+
+```
+
+## Load the bs-seq data
+
+```{r, bsseq}
+bs <- readRDS("bs.rds") #
+rowRanges(bs)
+pData(bs)
+
+
+bsseq::getMeth(bs, what = "perBase") #Matrix with CP fractions of all the elements
+```
+
+## Get annotations
+
+```{r, get annotations}
+# genes
+ensdb <- ah[["AH109336"]]
+
+chr22 <-  GRanges(seqnames=Rle(c("22")), 
+                  ranges = IRanges(1, end=195471971))
+genesChr22 <- genes(ensdb, columns=c("gene_seq_start", "gene_seq_end", "gene_name"),
+                    filter=GRangesFilter(chr22))
+seqlevelsStyle(genesChr22) <- "UCSC"
+
+```
+
+## Get methylation of the genes
+
+```{r, calculate methlyation}
+metPr <- bsseq::getMeth(bs, 
+                        regions=genesChr22, 
+                        what="perRegion")
+colnames(metPr) <- colnames(bs)
+rownames(metPr) <- genesChr22$gene_name
+metPr <- metPr[!is.na(rowSums(metPr)),]
+```
+
+
+
+
+## Calculate differential methylation
+
+
+```{r, dm testing, eval=FALSE}
+design <- model.matrix(~Type+Pair, data=pData(bs)) # design matrix
+design # AM: normal or cancer and indication to which pair sample belongs, samples are paired form each patient for cancer and healthy
+
+
+
+# adapt for methylation data
+methdesign <- modelMatrixMeth(design)
+
+seqAnnot <- sequencing.annotate(bs, methdesign, all.cov=TRUE, coef="Typenormal") 
+dmrcateRes <- dmrcate(seqAnnot, C=2, min.cpgs = 10, pcutoff=0.01)
+
+dmrRanges <- extractRanges(dmrcateRes, genome="hg38")
+saveRDS(dmrRanges, "dmr.rds")
+```
+
+
+```{r, load dmr}
+dmrRanges <- readRDS("dmr.rds")
+dmrRangesGenes <- dmrRanges[!is.na(dmrRanges$overlapping.genes)]
+
+```
+
+
+
+```{r, top DMRs}
+# Get the genes within Differentially methylated regions
+topIdx <- order(dmrRangesGenes$min_smoothed_fdr)[1:5]
+dmrRangesGenes[topIdx[1:5],]
+```
+
+
+```{r, top DMR genes}
+genesDmr <- unlist(tstrsplit(dmrRangesGenes[topIdx]$overlapping.genes, split=", "))
+genesDmr <- genesDmr[!is.na(genesDmr)]
+dmrGenes <- genesChr22[genesChr22$gene_name %in% genesDmr]
+dmrGenes
+```
+
+## Plot methylation of genes of top DMRs
+
+```{r, methylation of top DMR genes}
+metPr_top_dmrGenes <- metPr[dmrGenes$gene_name, ]
+```
+
+
+```{r, heatmap top DMR}
+library(viridis)
+library(pheatmap)
+annotationCol <- as.data.frame(pData(bs)[,c("Type","Pair")])
+rownames(annotationCol) <- colnames(metPr_top_dmrGenes)
+pheatmap::pheatmap(metPr_top_dmrGenes, 
+                   cluster_rows=TRUE,
+                   cluster_cols=FALSE,
+                   annotation_col=annotationCol,
+                   show_rownames = TRUE,
+                   color=rocket(10))
+```
+
+
+## Enrichment
+
+```{r, all DMRs}
+
+# Get all the genes in DMRs
+All_Idx <- order(dmrRangesGenes$min_smoothed_fdr)
+genesDmr_all <- unlist(tstrsplit(dmrRangesGenes[All_Idx]$overlapping.genes, split=", "))
+genesDmr_all <- genesDmr_all[!is.na(genesDmr_all)]
+dmrGenes_all <- genesChr22[genesChr22$gene_name %in% genesDmr_all]
+dmrGenes_all
+
+```
+
+
+
+```{r, rGREAT}
+suppressPackageStartupMessages({
+  library(rGREAT)
+})
+```
+
+```{r, GREAT job}
+job <- submitGreatJob(gr=dmrGenes_all, bg=genesChr22, species="hg38")
+res <- getEnrichmentTables(job)
+names(res)
+```
+
+
+We use all the genes of chromosome 22 as the background, since we want to know if a certain function is enriched in the differentially methylated genes of chromosome 22 in cancer patients compared to the control. We only use genes from chromsome 22 and not the whole genome as the background since certain functions might be enriched in the whole chromosome compared to the whole genome.
+
+
+```{r, Biological processes, fig.width=9, fig.height=6}
+bp <- res$`GO Biological Process`
+head(bp)
+
+ggplot(head(bp,15), aes(Hyper_Fold_Enrichment, reorder(name, Hyper_Adjp_BH), size=Hyper_Foreground_Region_Hits, color=-log10(Hyper_Adjp_BH))) + geom_point() + scale_color_viridis_c()
+```
+
+The biological processes are quite broad. However, there are a few interesting enrichments. Cancer cells undergo dramatic mechanobiological changes.  This is potentially seen in the altered actin cytoskeleton organisation and the altered regulation of cell adhesion. Changes in cell adhesion could also be related to cancer metastasis. Altered response to oxygen-containing compounds is also interesting, since cancer cells are adapted to hypoxia. 
+
+```{r, Cellular Component, fig.width=9, fig.height=6}
+cc <- res$`GO Cellular Component`
+head(cc)
+
+ggplot(head(cc,15), aes(Hyper_Fold_Enrichment, reorder(name, Hyper_Adjp_BH), size=Hyper_Foreground_Region_Hits, color=-log10(Hyper_Adjp_BH))) + geom_point() + scale_color_viridis_c()
+```
+The cellular compartment analysis is too broad to make any conclusions. The strong enrichment of endosome and golgi membrane related genes could suggest altered intracellular transport in cancer cells. 
+
+
+```{r, Molecular Function, fig.width=9, fig.height=6}
+mf <- res$`GO Molecular Function`
+head(mf)
+
+ggplot(head(mf,15), aes(Hyper_Fold_Enrichment, reorder(name, Hyper_Adjp_BH), size=Hyper_Foreground_Region_Hits, color=-log10(Hyper_Adjp_BH))) + geom_point() + scale_color_viridis_c()
+```
+
+There is a strong enrichment for protein tyrosine kinase activity. Many of the common growth factors are part of the tyrosine kinase receptor system (like insulin signaling), thus increased anabolic processes in cancer could be the reason for this enrichment. 
+One of the most important tyrosine kinase signaling related proteins is the oncogene Ras. The fact that Ras guanyl-nucleotide exchange factor activity (and thus regulation of Ras) is enriched makes it very likely that a oncogenic mutation of Ras is present in these cancer patients. 
+
+
+
+
